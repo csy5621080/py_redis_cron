@@ -1,0 +1,170 @@
+import time
+import pickle
+import uuid
+from collections import namedtuple
+import base64
+import datetime
+import redis
+runtimeJob = namedtuple('runtimeJob', ['id', 'timestamp'])
+
+redis_client = redis.StrictRedis(
+               host=redis_host,
+               port=redis_port,
+               password=redis_password,
+               db=0,
+               encoding='utf-8',
+               decode_responses=True,
+            )
+
+r = redis_client
+r.flushdb()
+
+
+class JobType(object):
+    Definite = 'definite'
+    Monthly = 'monthly'
+    Daily = 'daily'
+    Hourly = 'hourly'
+    Minutely = 'minutely'
+    Secondly = 'secondly'
+
+
+JOB_TYPE = {14: JobType.Definite,
+            10: JobType.Monthly, 9: JobType.Monthly,
+            8: JobType.Daily, 7: JobType.Daily,
+            6: JobType.Hourly, 5: JobType.Hourly,
+            4: JobType.Minutely, 3: JobType.Minutely,
+            2: JobType.Secondly, 1: JobType.Secondly}
+
+
+def time_handler(job_type):
+    date_time = datetime.datetime.now()
+    year = '0000'
+    month = '00'
+    day = '00'
+    hour = '00'
+    minute = '00'
+
+    def deal_time(param):
+        res = getattr(date_time, param)
+        if len(str(res)) == 2:
+            return str(res)
+        else:
+            return '0' + str(res)
+
+    if job_type == JobType.Secondly:
+        second = deal_time('second')
+        res = year + month + day + hour + minute + second
+    elif job_type == JobType.Minutely:
+        minute = deal_time('minute')
+        second = deal_time('second')
+        res = year + month + day + hour + minute + second
+    elif job_type == JobType.Hourly:
+        hour = deal_time('hour')
+        minute = deal_time('minute')
+        second = deal_time('second')
+        res = year + month + day + hour + minute + second
+    elif job_type == JobType.Daily:
+        day = deal_time('day')
+        hour = deal_time('hour')
+        minute = deal_time('minute')
+        second = deal_time('second')
+        res = year + month + day + hour + minute + second
+    elif job_type == JobType.Monthly:
+        month = deal_time('month')
+        day = deal_time('day')
+        hour = deal_time('hour')
+        minute = deal_time('minute')
+        second = deal_time('second')
+        res = year + month + day + hour + minute + second
+    else:
+        year = str(date_time.year)
+        month = deal_time('month')
+        day = deal_time('day')
+        hour = deal_time('hour')
+        minute = deal_time('minute')
+        second = deal_time('second')
+        res = year + month + day + hour + minute + second
+    return int(res)
+
+
+def test_func(param):
+    print(str(time.time()))
+    print(f'this is func {param}')
+
+
+class CronJob(object):
+
+    def __init__(self, func, args, second, minute=None, hour=None, day=None, month=None, year=None):
+        _year = '0000'
+        _month = '00'
+        _day = '00'
+        _hour = '00'
+        _minute = '00'
+        _second = '00'
+        if year:
+            _year = str(year)
+        if month:
+            month = str(month)
+            if len(str(month)) == 1:
+                month = '0' + month
+            _month = month
+        if day:
+            day = str(day)
+            if len(str(day)) == 1:
+                day = '0' + day
+            _day = day
+        if hour:
+            hour = str(hour)
+            if len(str(hour)) == 1:
+                hour = '0' + hour
+            _hour = hour
+        if minute:
+            minute = str(minute)
+            if len(str(month)) == 1:
+                minute = '0' + minute
+            _minute = minute
+        if second:
+            second = str(second)
+            if len(str(second)) == 1:
+                second = '0' + second
+            _second = second
+        base_time_stamp = _year + _month + _day + _hour + _minute + _second
+        self.time_stamp = int(base_time_stamp)
+        self.job_type = JOB_TYPE[len(str(self.time_stamp))]
+        self.func = func
+        self.args = args
+        self.func_pk = self.init_func()
+
+    def init_func(self):
+        job_pk = str(uuid.uuid4())
+        r.hmset('cron_jobs_queue', {job_pk: base64.b64encode(pickle.dumps(dict(func=self.func, args=self.args),
+                                                             pickle.HIGHEST_PROTOCOL))})
+        return job_pk
+
+    def add(self):
+        r.zadd(f'cron_jobs_{self.job_type}', {self.func_pk: self.time_stamp})
+
+
+CronJob(test_func, ('Test1', ), 0, 15, 14).add()
+
+CronJob(test_func, ('Test2', ), 30).add()
+
+
+while True:
+    time.sleep(1)
+    for job_set, job_type in {f'cron_jobs_{JobType.Secondly}': JobType.Secondly,
+                              f'cron_jobs_{JobType.Minutely}': JobType.Minutely,
+                              f'cron_jobs_{JobType.Hourly}': JobType.Hourly,
+                              f'cron_jobs_{JobType.Daily}': JobType.Daily,
+                              f'cron_jobs_{JobType.Monthly}': JobType.Monthly,
+                              f'cron_jobs_{JobType.Definite}': JobType.Definite}.items():
+        first_job = r.zrange(job_set, 0, 0, withscores=True)
+        if first_job:
+            runtime_job = runtimeJob(*first_job[0])
+            if runtime_job.timestamp == time_handler(job_type):
+                job_map = pickle.loads(base64.b64decode(r.hmget('cron_jobs_queue', runtime_job.id)[0]))
+                job_map['func'](*job_map['args'])
+                if job_type == JobType.Definite:
+                    r.zrem(job_set, runtime_job.id)
+                    r.hdel('cron_jobs_queue', runtime_job.id)
